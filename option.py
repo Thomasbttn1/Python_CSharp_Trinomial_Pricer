@@ -8,7 +8,7 @@ class Option:
         self.type = type          # 'european' or 'american'
         self.div = div
         self.div_date = div_date
-        self.start_date = datetime.today()
+        self.start_date = datetime(2025, 9, 1)
 
     def payoff(self, S: float) -> float:
         if self.call_put == "call":
@@ -27,6 +27,7 @@ class Option:
             return None
         return delta_days / 365.0
     
+
         
     
 

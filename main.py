@@ -1,5 +1,6 @@
 # main.py
 from market import Market
+import market
 from option import Option
 import option
 from tree import Tree
@@ -12,6 +13,7 @@ sys.setrecursionlimit(20000) #pour permettre une récursion plus profonde
 import numpy as np
 import matplotlib.pyplot as plt
 from datetime import datetime
+from datetime import timedelta
 import time #pour mesurer les temps d'exécution
 
 
@@ -173,9 +175,11 @@ def compare_euro_amer_call_put(option, market: Market, K: float, T: float, Ns):
 
 def main():
     # Marché et option "de base"
-    dividend_date = datetime(2026, 9, 9)  # Exemple de date de dividende (format year month)
-    market = Market(underlying=100.0, rate=0.01, vol=0.50)
-    option = Option(t=1.0, call_put="call", K=100.0, type="european", div=50, div_date=dividend_date)
+
+    # dividend_date = datetime.now() + timedelta(days=150) 
+    dividend_date = datetime(2026, 4, 21) # Exemple de date de dividende (format year month)
+    market = Market(underlying=100.0, rate=0.05, vol=0.30)
+    option = Option(t=1.0, call_put="call", K=102.0, type="european", div=10, div_date=dividend_date)
 
     # --- Convergence (européen) --- (enlever les commentaires pour lancer)
     """
@@ -192,13 +196,24 @@ def main():
 
     # --- Plot de l’arbre pour un N choisi (si besoin) ---
     
+    # --- Preview court de l'arbre avec proba sur les arêtes ---
+    """
     nb_steps_plot = 5
     tree = Tree(market=market, nb_steps=nb_steps_plot, delta_t=option.t / nb_steps_plot)
+
+    # Construit l'arbre (assure-toi que build_bottom_first remplit bien tree.step_probs[i] = (pd, pm, pu))
     tree.build_bottom_first(option)
-    if nb_steps_plot <= 20:
-        tree.plot()
-    
-    
+
+    # Trace : valeurs nodales + proba sur chaque arête i -> i+1 (en FULL seulement)
+    tree.plot(
+        annotate=True,           # affiche les S(i,j) sur les nœuds si N <= 20
+        figsize=(12, 7),
+        dpi=110,
+        save_path=None,          # tu peux mettre un chemin si tu veux sauvegarder
+        show_edge_probs=True,    # <<--- proba sur les arêtes
+        edge_prob_digits=3       # précision d’affichage
+    )
+    """
 
     # --- GAP en fonction du strike (européen uniquement) ---
     """
@@ -208,7 +223,7 @@ def main():
     nK_points = 61
     plot_gap_vs_strike(market, option, N=N_gap, K_min=K_min, K_max=K_max, nK=nK_points)
     """
-    # --- Comparaison Euro vs Américain — CALL & PUT (sans dividendes) ---
+    # --- Comparaison Euro vs Américain — CALL & PUT  ---
     """
     K_compare = 100.0
     T_compare = 1.0
@@ -216,12 +231,28 @@ def main():
     compare_euro_amer_call_put(option, market, K_compare, T_compare, Ns_compare)
     """
     # --- Prix avec un N "grand" pour référence ---
-    """
+
     N_large = 1000
     tree_highres = Tree(market=market, nb_steps=N_large, delta_t=option.t / N_large)
+
+    # --- 1️⃣ Construction de l’arbre ---
+    t0 = time.time()
     tree_highres.build_bottom_first(option)
+    t1 = time.time()
+    print(f"⏱ Temps de construction de l’arbre : {t1 - t0:.4f} secondes")
+
+    # --- 2️⃣ Pricing backward (méthode classique) ---
+    t2 = time.time()
     price_highres = tree_highres.price_european(option)
+    t3 = time.time()
+    print(f"⏱ Temps de pricing backward : {t3 - t2:.4f} secondes")
+
+    # --- 3️⃣ Pricing backward récursif ---
+    t4 = time.time()
     price_highres_rec = tree_highres.price_european_recursive(option)
+    t5 = time.time()
+    print(f"⏱ Temps de pricing récursif : {t5 - t4:.4f} secondes")
+
 
     print("=" * 70)
     print(f" \nPrix de l'option avec N = {N_large} pas : {price_highres:.6f}")
@@ -229,11 +260,11 @@ def main():
     print(f"\nPrix Black–Scholes (référence fermée) sans div: "
           f"{black_scholes_price(market.underlying, option.K, option.t, market.rate, market.vol, option.call_put):.6f}\n")
     print("=" * 70)
-    """
+    
 
     # --- Calcul et affichage des grecques ---
     """
-    nb_steps = 1000  # ou le N de ton pricing
+    nb_steps = 400  # ou le N de ton pricing
     tree = Tree(market=market, nb_steps=nb_steps, delta_t=option.t / nb_steps)
     tree.build_bottom_first(option)
 
@@ -244,6 +275,7 @@ def main():
     print(f"Gamma = {greeks['gamma']:.6e}")
     print(f"Theta = {greeks['theta']:.6f}  THETA FAUX (à corriger)")
     """
+    
 
     # --- appel du plot adaptatif ---
     """
