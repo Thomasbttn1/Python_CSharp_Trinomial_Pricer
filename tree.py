@@ -1,9 +1,9 @@
 # tree.py
+from functools import lru_cache
 from node import Node
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from functools import lru_cache
 from matplotlib.collections import LineCollection
 
 class Tree:
@@ -92,115 +92,153 @@ class Tree:
             nd = nd.down
         return nd
 
+    def _clear_values(self):
+        """Remet .value = None sur tous les nœuds (pour mémo récursive propre)."""
+        N = self.nb_steps
+        for i in range(0, N + 1):
+            head_i = self._head_last if (i == N and self._head_last is not None) else self._level_head(i)
+            for nd in head_i.iter_right():
+                nd.value = None
+
     # ---------- construction de l'arbre ----------
     def build_bottom_first(self, option):
         """
-        Construction colonne par colonne sans containers :
-        - Chaque colonne i est une liste chaînée (left/right).
-        - Recombinaison par pointeurs down/mid/up depuis la colonne i-1 vers i.
-        - Probas ex-div stockées sur les nœuds sources au step concerné.
+        Méthode de construction : approche "colonne par colonne" (sans liste ni dictionnaire).
+        -------------------------------------------------------------------------------
+        - On part du tronc (racine) : le nœud (i=0, j=0) avec S0.
+        - À chaque étape i :
+            On calcule le forward local (fwd_mid) centré sur la valeur médiane courante.
+            On crée la colonne i (chaînée gauche → droite) :
+                - Chaque nœud est relié à son voisin via .right et .left
+                - Ses prix sont espacés géométriquement avec le facteur alpha.
+            On relie la colonne i−1 à la colonne i :
+                - Chaque nœud parent pointe vers ses trois enfants : down, mid, up.
+            Si un dividende est payé à cette étape :
+                - On calcule les probabilités (p_down, p_mid, p_up) pour chaque nœud source.
+                - Ces proba sont stockées directement dans les nœuds sources.
+            On repère le nœud dont le prix est le plus proche du forward local
+                (c’est notre “centre” du pas suivant).
+        - On répète jusqu’à atteindre la profondeur N.
+        - À la fin, self._head_last pointe sur la colonne finale (pour le pricing).
+        -------------------------------------------------------------------------------
+        Cette méthode ne crée aucune liste ni dictionnaire :
+        l’arbre est formé uniquement par une succession de nœuds reliés entre eux.
         """
+
+        # Factorisation: pré-calculs et boucle principale délégués à des helpers
         N, dt, a = self.nb_steps, self.delta_t, self.alpha
         S0, r, sigma = self.market.underlying, self.market.rate, self.market.vol
-
         i_div, D = self._div_step_index(option)
 
-        # force le calcul une fois des probas "no-div"
-        self.trinomial_prob_no_div()
+        exp_rdt, exp_2rdt, var_factor = self._build_precomputations(dt, sigma, r)
 
+        self.trinomial_prob_no_div()  # calcule la triplette globale no-div
         current_mid = S0
-        prev_head = None  # tête de la colonne i-1
-
-        exp_rdt    = math.exp(r * dt)
-        exp_2rdt   = math.exp(2.0 * r * dt)
-        var_factor = math.exp((sigma ** 2) * dt) - 1.0
+        prev_head = None
 
         for i in range(1, N + 1):
-            # dividende payé sur (i-1 -> i) ?
             D_next = D if (i_div is not None and i == i_div) else 0.0
-
-            # forward local net du dividende autour duquel on centre la colonne i
             fwd_mid = current_mid * exp_rdt - D_next
 
-            # 1) Construire la colonne i (chaînée gauche->droite) et trouver le "mid" réel
-            # j va de -i à +i ; S(i,j) = fwd_mid * a^j
-            head_i = Node(self, i, -i)
-            head_i.under = fwd_mid * (a ** (-i))
+            head_i, nxt_mid_S = self._create_column(i, fwd_mid, a)
+            self._link_parent_to_child(prev_head, head_i)
 
-            cur = head_i
-            nxt_mid_node = head_i
-            min_dev = abs(head_i.under - fwd_mid)
+            if D_next != 0.0:
+                self._assign_dividend_probs(D_next, prev_head, exp_rdt, exp_2rdt, var_factor, a)
 
-            for j in range(-i + 1, i + 1):
-                nd = Node(self, i, j)
-                nd.under = fwd_mid * (a ** j)
-                # chainage horizontal
-                cur.right = nd
-                nd.left = cur
-                cur = nd
-
-                # repérer le nœud le plus proche du forward
-                dev = abs(nd.under - fwd_mid)
-                if dev < min_dev:
-                    min_dev = dev
-                    nxt_mid_node = nd
-
-            nxt_mid_node.forward = fwd_mid
-            nxt_mid_S = nxt_mid_node.under
-
-            # 2) Recombinaison : lier enfants depuis la colonne i-1 vers i
-            if i == 1:
-                # les enfants de la racine
-                parent = self.root            # j=0
-                child  = head_i               # j=-1 = (j_parent - 1)
-                parent.down = child           # j-1
-                parent.mid  = child.right     # j
-                parent.up   = child.right.right  # j+1
-            else:
-                # on positionne le parent le plus à gauche (j=-(i-1))
-                parent = prev_head
-                # et le "curseur enfant" au j_parent-1 = -i
-                child = head_i
-                while parent is not None:
-                    parent.down = child
-                    parent.mid  = child.right
-                    parent.up   = child.right.right
-                    # avance : parent j -> j+1, child j-1 -> j
-                    parent = parent.right
-                    child  = child.right
-
-            # 3) Probabilités au step (i-1 -> i)
-            if D_next == 0.0:
-                # step "no-div": rien à stocker localement (on utilisera la triplette globale)
-                pass
-            else:
-                # ex-div : calculer E, V, et proba PAR nœUD SOURCE de la colonne i-1
-                # tête de la colonne i-1 = prev_head (sauf i=1: parent unique = root)
-                if i == 1:
-                    # nœud source unique : root
-                    sources = [self.root]
-                else:
-                    sources = list(prev_head.iter_right())
-
-                for nd_prev in sources:
-                    S_prev = nd_prev.under
-                    E_j = S_prev * exp_rdt - D_next
-                    V_j = (S_prev ** 2) * exp_2rdt * var_factor
-
-                    mid_child = nd_prev.mid  # enfant "mid" (i, j_prev)
-                    p_d, p_m, p_u = self._solve_trinomial_probs(E_j, V_j, mid_child.under, a)
-
-                    # stocker sur le nœud source
-                    nd_prev.pd, nd_prev.pm, nd_prev.pu = p_d, p_m, p_u
-
-            # 4) préparer l'itération suivante
             prev_head = head_i
             current_mid = nxt_mid_S
 
         self._head_last = prev_head
         return self
 
+    # helpers pour build_bottom_first: tous privés et courts
+    def _build_precomputations(self, dt, sigma, r):
+        exp_rdt = math.exp(r * dt)
+        exp_2rdt = math.exp(2.0 * r * dt)
+        var_factor = math.exp((sigma ** 2) * dt) - 1.0
+        return exp_rdt, exp_2rdt, var_factor
+
+    def _create_column(self, i, fwd_mid, a):
+        head_i = Node(self, i, -i)
+        head_i.under = fwd_mid * (a ** (-i))
+
+        cur = head_i
+        nxt_mid_node = head_i
+        min_dev = abs(head_i.under - fwd_mid)
+
+        for j in range(-i + 1, i + 1):
+            nd = Node(self, i, j)
+            nd.under = fwd_mid * (a ** j)
+            cur.right = nd
+            nd.left = cur
+            cur = nd
+
+            dev = abs(nd.under - fwd_mid)
+            if dev < min_dev:
+                min_dev = dev
+                nxt_mid_node = nd
+
+        nxt_mid_node.forward = fwd_mid
+        nxt_mid_S = nxt_mid_node.under
+        return head_i, nxt_mid_S
+
+    def _link_parent_to_child(self, prev_head, head_i):
+        if prev_head is None:
+            parent = self.root
+            child = head_i
+            parent.down = child
+            parent.mid = child.right
+            parent.up = child.right.right
+            return
+
+        parent = prev_head
+        child = head_i
+        while parent is not None:
+            parent.down = child
+            parent.mid = child.right
+            parent.up = child.right.right
+            parent = parent.right
+            child = child.right
+
+    def _assign_dividend_probs(self, D_next, prev_head, exp_rdt, exp_2rdt, var_factor, a):
+        if prev_head is None:
+            sources = [self.root]
+        else:
+            sources = list(prev_head.iter_right())
+
+        for nd_prev in sources:
+            S_prev = nd_prev.under
+            E_j = S_prev * exp_rdt - D_next
+            V_j = (S_prev ** 2) * exp_2rdt * var_factor
+            mid_child = nd_prev.mid
+            p_d, p_m, p_u = self._solve_trinomial_probs(E_j, V_j, mid_child.under, a)
+            nd_prev.pd, nd_prev.pm, nd_prev.pu = p_d, p_m, p_u
+
     # ---------- pricing ----------
+
+    def price(self, option, engine: str = "backward", style: str = "european"):
+        """
+        Point d'entrée unique pour pricer:
+        - engine:   "backward" | "recursive"
+        - style:    "european" | "american"
+        Redirige vers la bonne méthode spécialisée.
+        """
+        engine = engine.lower().strip()
+        style  = style.lower().strip()
+
+        if style == "european" and engine == "backward":
+            return self.price_european_backward(option)
+        elif style == "european" and engine == "recursive":
+            return self.price_european_recursive(option)
+        elif style == "american" and engine == "backward":
+            return self.price_american_backward(option)
+        elif style == "american" and engine == "recursive":
+            return self.price_american_recursive(option)
+        else:
+            raise ValueError("Combinaison (engine, style) invalide. "
+                             "engine ∈ {'backward','recursive'}, style ∈ {'european','american'}.")
+
     def _probas_for_node(self, nd):
         """
         Renvoie (pd, pm, pu) applicables au step sortant du nœud nd.
@@ -211,7 +249,7 @@ class Tree:
             return nd.pd, nd.pm, nd.pu
         return self._pd_global, self._pm_global, self._pu_global
 
-    def price_european(self, option):
+    def price_european_backward(self, option):
         """
         Backward itératif (sans containers).
         Hypothèse : l'arbre a été construit via build_bottom_first(option).
@@ -228,37 +266,70 @@ class Tree:
         for i in range(N - 1, -1, -1):
             head_i = self._level_head(i)
             for nd in head_i.iter_right():
-                pu_nd, pm_nd, pd_nd = self._probas_for_node(nd)
+                pd_nd, pm_nd, pu_nd = self._probas_for_node(nd)
                 v_up   = nd.up.value
                 v_mid  = nd.mid.value
                 v_down = nd.down.value
                 nd.value = DF * (pu_nd * v_up + pm_nd * v_mid + pd_nd * v_down)
+
         return self.root.value
 
     def price_european_recursive(self, option):
         """
-        Version récursive avec memo implicite (lru_cache sur l'identité des nœuds).
-        Sans containers (on part de la racine et on suit les pointeurs).
+        Récursif mémoïsé directement sur les nœuds (pas de lru_cache).
+        → beaucoup moins d'overhead que de hasher des objets Node.
         """
-        from functools import lru_cache
-        N, dt = self.nb_steps, self.delta_t
-        DF = math.exp(-self.market.rate * dt)
+        DF = math.exp(-self.market.rate * self.delta_t)
+        payoff = option.payoff
+        probas = self._probas_for_node
 
-        @lru_cache(maxsize=None)
-        def V(node_obj: Node):
-            # terminal si pas d'enfants (colonne N)
-            if node_obj.down is None:
-                return option.payoff(node_obj.under)
-            pd_nd, pm_nd, pu_nd = self._probas_for_node(node_obj)
-            return DF * (
-                pu_nd * V(node_obj.up) +
-                pm_nd * V(node_obj.mid) +
-                pd_nd * V(node_obj.down)
-            )
+        self._clear_values()
+
+        def V(nd: Node):
+            # mémo local
+            if nd.value is not None:
+                return nd.value
+            # terminal: pas d'enfants
+            if nd.down is None:
+                val = payoff(nd.under)
+                nd.value = val
+                return val
+            pd_nd, pm_nd, pu_nd = probas(nd)
+            up, mid, down = nd.up, nd.mid, nd.down
+            cont = DF * (pu_nd * V(up) + pm_nd * V(mid) + pd_nd * V(down))
+            nd.value = cont
+            return cont
 
         return V(self.root)
 
-    def price_american(self, option):
+    def price_american_recursive(self, option):
+        """
+        Récursif mémoïsé directement sur les nœuds (pas de lru_cache), style américain.
+        """
+        DF = math.exp(-self.market.rate * self.delta_t)
+        payoff = option.payoff
+        probas = self._probas_for_node
+
+        self._clear_values()
+
+        def V(nd: Node):
+            if nd.value is not None:
+                return nd.value
+            if nd.down is None:
+                val = payoff(nd.under)
+                nd.value = val
+                return val
+            pd_nd, pm_nd, pu_nd = probas(nd)
+            up, mid, down = nd.up, nd.mid, nd.down
+            cont = DF * (pu_nd * V(up) + pm_nd * V(mid) + pd_nd * V(down))
+            exer = payoff(nd.under)
+            val = cont if cont >= exer else exer
+            nd.value = val
+            return val
+
+        return V(self.root)
+    
+    def price_american_backward(self, option):
         """
         Backward itératif avec exercice anticipé (PUT/option américaine).
         """
@@ -274,7 +345,7 @@ class Tree:
         for i in range(N - 1, -1, -1):
             head_i = self._level_head(i)
             for nd in head_i.iter_right():
-                pu_nd, pm_nd, pd_nd = self._probas_for_node(nd)
+                pd_nd, pm_nd, pu_nd = self._probas_for_node(nd)  # ordre correct des probas
                 hold = DF * (
                     pu_nd * nd.up.value +
                     pm_nd * nd.mid.value +

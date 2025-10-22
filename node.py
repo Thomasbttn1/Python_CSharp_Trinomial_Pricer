@@ -1,7 +1,3 @@
-import math
-from turtle import pu
-import numpy as np
-
 # node.py
 class Node:
     """

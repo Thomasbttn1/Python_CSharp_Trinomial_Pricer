@@ -1,4 +1,4 @@
-# main.py
+# main.py 
 from market import Market
 from option import Option
 from tree import Tree
@@ -159,7 +159,7 @@ def main():
     # Marché et option "de base"
     dividend_date = datetime(2026, 3, 1)
     market = Market(underlying=100.0, rate=0.03, vol=0.20)
-    option = Option(t=1.0, call_put="put", K=100.0, type="european", div=2, div_date=dividend_date)
+    option = Option(t=1.0, call_put="put", K=100.0, type="american", div=2, div_date=dividend_date)
 
     # --- Prix avec un N "grand" pour référence ---
     N_large = 1000
@@ -171,29 +171,37 @@ def main():
     t1 = time.time()
     print(f"⏱ Temps de construction de l’arbre : {t1 - t0:.4f} secondes")
 
-    # 2) Pricing backward
+    # 2) Pricing — EUROPÉEN
     t2 = time.time()
-    price_highres = tree_highres.price_european(option)
+    price_euro_back = tree_highres.price(option, engine="backward", style="european")
     t3 = time.time()
-    print(f"⏱ Temps de pricing backward : {t3 - t2:.4f} secondes")
+    t_back_eu = t3 - t2
+    print(f"⏱ Temps de pricing backward (EU)  : {t_back_eu:.4f} secondes")
 
-    # 3) Pricing récursif (memo lru_cache)
     t4 = time.time()
-    price_highres_rec = tree_highres.price_european_recursive(option)
+    price_euro_rec = tree_highres.price(option, engine="recursive", style="european")
     t5 = time.time()
-    print(f"⏱ Temps de pricing récursif : {t5 - t4:.4f} secondes")
+    t_rec_eu = t5 - t4
+    print(f"⏱ Temps de pricing récursif (EU) : {t_rec_eu:.4f} secondes")
 
-    # 4) American
+    # 3) Pricing — AMÉRICAIN
     t6 = time.time()
-    price_highres_american = tree_highres.price_american(option)
+    price_amer_back = tree_highres.price(option, engine="backward", style="american")
     t7 = time.time()
-    print(f"⏱ Temps de pricing américain : {t7 - t6:.4f} secondes")
+    t_back_us = t7 - t6
+    print(f"⏱ Temps de pricing backward (US) : {t_back_us:.4f} secondes")
 
+    t8 = time.time()
+    price_amer_rec = tree_highres.price(option, engine="recursive", style="american")
+    t9 = time.time()
+    t_rec_us = t9 - t8
+    print(f"⏱ Temps de pricing récursif (US) : {t_rec_us:.4f} secondes")
+
+    # 4) Récap / affichage
     print("=" * 70)
-    print(f" \nPrix de l'option avec N = {N_large} pas : {price_highres:.6f}")
-    print(f" (via backward) et {price_highres_rec:.6f} (via récursif)\n")
-    print(f"Prix American avec N = {N_large} pas : {price_highres_american:.6f}\n")
-    print(f"\nPrix Black–Scholes (référence fermée) sans div: "
+    print(f"\nPrix EU avec N = {N_large} pas : {price_euro_back:.6f} (backward)  |  {price_euro_rec:.6f} (récursif)")
+    print(f"Prix US avec N = {N_large} pas : {price_amer_back:.6f} (backward)  |  {price_amer_rec:.6f} (récursif)\n")
+    print(f"Prix Black–Scholes (référence fermée, EU sans div) : "
           f"{black_scholes_price(market.underlying, option.K, option.t, market.rate, market.vol, option.call_put):.6f}\n")
     print("=" * 70)
 
