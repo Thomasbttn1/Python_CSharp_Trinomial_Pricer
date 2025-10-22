@@ -7,52 +7,51 @@ from functools import lru_cache
 from matplotlib.collections import LineCollection
 
 class Tree:
+    """
+    Arbre trinomial recombinant sans listes/dictionnaires :
+    - Seuls des nœuds "chaînés" sont utilisés.
+    - On garde la racine et on parcourt via pointeurs.
+    - Les probas "no-div" sont globales (triplette scalaire).
+    - Les probas "ex-div" sont stockées sur chaque nœud source (pd/pm/pu).
+    """
+
     def __init__(self, market, nb_steps: int, delta_t: float):
         self.market = market
         self.nb_steps = nb_steps
         self.delta_t = delta_t
-        self.alpha = math.exp(market.vol * math.sqrt(3 * delta_t))
-        self.root = Node(self, 0, 0)  # racine
-        # probas par pas i -> i+1 : {i: (p_down, p_mid, p_up)}
-        self.step_probs = {}
+
+        self.alpha = math.exp(market.vol * math.sqrt(3.0 * delta_t))
+        self.root = Node(self, 0, 0)
+        self.root.under = market.underlying
+        self.root.forward = market.underlying  # au départ
+
+        # Probas "no-div" globales (remplies à la 1ère demande)
+        self._pd_global = None
+        self._pm_global = None
+        self._pu_global = None
+
+        # Pointeur (optionnel) vers la tête de la colonne finale (N)
+        self._head_last = None
 
     # ---------- utilitaires ----------
-    def pick_next_mid_closest_to_forward(self, nodes_next_col, fwd):
-        """Renvoie le Node (colonne i+1) dont le prix est le plus proche du forward attendu."""
-        nodes = nodes_next_col.values() if isinstance(nodes_next_col, dict) else nodes_next_col
-        return min(nodes, key=lambda n: abs(n.under - fwd))
-
-    def _div_step_index(self, option):
-        """Mappe option.div_date (en années) vers l'indice de pas i_div (1..N), sinon None."""
-        if option is None or not getattr(option, "div", 0) or option.div_date is None:
-            return None, 0.0
-        t_div = option.get_div_time_in_years()
-        T = self.nb_steps * self.delta_t
-        if not (0.0 < t_div <= T + 1e-12):
-            return None, 0.0
-
-        # Mapping par intervalles: ((i-1)*dt, i*dt]  -> i
-        # => i_div = ceil(t_div / dt), avec une micro tolérance pour les bords
-        i_div = int(math.ceil((t_div - 1e-12) / self.delta_t))
-        i_div = max(1, min(self.nb_steps, i_div))  # clamp de sécurité
-        return i_div, float(option.div)
-
     def trinomial_prob_no_div(self):
-        """Probabilités fermées quand D=0 sur le pas (K-T)."""
-        a = self.alpha
-        v = math.exp((self.market.vol ** 2) * self.delta_t) - 1.0
-        denom = (1.0 - a) * ((a**-2) - 1.0)
-        p_down = v / denom
-        p_up   = p_down / a
-        p_mid  = 1.0 - p_up - p_down
-        return p_down, p_mid, p_up
+        """
+        Probabilités fermées quand D = 0 sur un step.
+        Renvoie (p_down, p_mid, p_up) et met en cache dans l'objet.
+        """
+        if self._pd_global is None:
+            a = self.alpha
+            v = math.exp((self.market.vol ** 2) * self.delta_t) - 1.0
+            denom = (1.0 - a) * ((a**-2) - 1.0)
+            p_down = v / denom
+            p_up   = p_down / a
+            p_mid  = 1.0 - p_up - p_down
+            self._pd_global, self._pm_global, self._pu_global = p_down, p_mid, p_up
+        return self._pd_global, self._pm_global, self._pu_global
 
     def _solve_trinomial_probs(self, E_target: float, V_next: float, nxt_mid_S: float, alpha: float):
         """
-        Résout (p_up, p_mid, p_down) en imposant :
-          somme = 1
-          E[S_{t+dt}|S_t]  = fwd = Si' * e^{r dt} - D_next
-          Var[S_{t+dt}|S_t]= Si'^2 e^{2 r dt} (e^{σ² dt} - 1)
+        Résout (p_down, p_mid, p_up) à partir d'E[S] et Var[S] conditionnels
         avec (Sup, Smid, Sdown) = (nxt_mid*a, nxt_mid, nxt_mid/a).
         """
         S_mid = float(nxt_mid_S)
@@ -63,235 +62,228 @@ class Tree:
         den = (1.0 - a) * ((inv_a * inv_a) - 1.0)
         p_down = num / den
 
-        # Équation d'espérance sur S_{i+1}/S_mid :
-        # (a - 1)*p_up + (a^-1 - 1)*p_down = E/S_mid - 1
         rhs   = (E_target / S_mid) - 1.0
         p_up  = (rhs - (inv_a - 1.0) * p_down) / (a - 1.0)
         p_mid = 1.0 - p_up - p_down
-
-        # Petit clip défensif pour les bords numériques
-        """
-        eps = 1e-12
-        p_down = 0.0 if p_down < -eps else (1.0 if p_down > 1.0 + eps else max(0.0, min(1.0, p_down)))
-        p_up   = 0.0 if p_up   < -eps else (1.0 if p_up   > 1.0 + eps else max(0.0, min(1.0, p_up)))
-        p_mid  = 1.0 - p_up - p_down  # renormalise après clip doux
-        """
-
         return p_down, p_mid, p_up
+
+    def _div_step_index(self, option):
+        """
+        Mappe la date de dividende en indice de pas i_div (1..N).
+        Retourne (i_div, D) ; i_div peut être None si pas de dividende dans [0,T].
+        """
+        if option is None or not getattr(option, "div", 0) or option.div_date is None:
+            return None, 0.0
+        t_div = option.get_div_time_in_years()
+        T = self.nb_steps * self.delta_t
+        if not (0.0 < t_div <= T + 1e-12):
+            return None, 0.0
+        i_div = int(math.ceil((t_div - 1e-12) / self.delta_t))
+        i_div = max(1, min(self.nb_steps, i_div))
+        return i_div, float(option.div)
+
+    def _level_head(self, i: int):
+        """
+        Retourne la tête (gauche) de la colonne i en descendant 'down' i fois
+        depuis la racine. Hypothèse : structure recombinante correctement liée.
+        """
+        nd = self.root
+        for _ in range(i):
+            nd = nd.down
+        return nd
 
     # ---------- construction de l'arbre ----------
     def build_bottom_first(self, option):
         """
-        Arbre trinomial recombinant, centré à chaque pas sur le forward local :
-            f_i = S_mid * e^{r dt} - D_i
-        (Le dividende est pris dans le forward, pas en baissant S_mid directement.)
+        Construction colonne par colonne sans containers :
+        - Chaque colonne i est une liste chaînée (left/right).
+        - Recombinaison par pointeurs down/mid/up depuis la colonne i-1 vers i.
+        - Probas ex-div stockées sur les nœuds sources au step concerné.
         """
         N, dt, a = self.nb_steps, self.delta_t, self.alpha
-        S0, r = self.market.underlying, self.market.rate
-        sigma = self.market.vol
+        S0, r, sigma = self.market.underlying, self.market.rate, self.market.vol
 
         i_div, D = self._div_step_index(option)
 
-        # racine
-        self.levels = {0: {0: self.root}}
-        self.root.under = S0
-        self.root.forward = S0
+        # force le calcul une fois des probas "no-div"
+        self.trinomial_prob_no_div()
 
-        # containers probas
-        self.step_probs = {}
-        self.step_probs_by_node = {}
+        current_mid = S0
+        prev_head = None  # tête de la colonne i-1
 
-        current_mid = S0  # centre de la colonne précédente
+        exp_rdt    = math.exp(r * dt)
+        exp_2rdt   = math.exp(2.0 * r * dt)
+        var_factor = math.exp((sigma ** 2) * dt) - 1.0
 
         for i in range(1, N + 1):
-            self.levels[i] = {}
-
             # dividende payé sur (i-1 -> i) ?
             D_next = D if (i_div is not None and i == i_div) else 0.0
 
-            # forward local net du dividende
-            fwd_mid = current_mid * math.exp(r * dt) - D_next
+            # forward local net du dividende autour duquel on centre la colonne i
+            fwd_mid = current_mid * exp_rdt - D_next
 
-            # construire la colonne i autour du forward théorique (géométrique via alpha)
-            for j in range(-i, i + 1):
+            # 1) Construire la colonne i (chaînée gauche->droite) et trouver le "mid" réel
+            # j va de -i à +i ; S(i,j) = fwd_mid * a^j
+            head_i = Node(self, i, -i)
+            head_i.under = fwd_mid * (a ** (-i))
+
+            cur = head_i
+            nxt_mid_node = head_i
+            min_dev = abs(head_i.under - fwd_mid)
+
+            for j in range(-i + 1, i + 1):
                 nd = Node(self, i, j)
                 nd.under = fwd_mid * (a ** j)
-                self.levels[i][j] = nd
+                # chainage horizontal
+                cur.right = nd
+                nd.left = cur
+                cur = nd
 
-            # choisir le vrai "mid" (noeud le plus proche du forward)
-            nxt_mid_node = self.pick_next_mid_closest_to_forward(self.levels[i], fwd_mid)
-            nxt_mid_S = nxt_mid_node.under
+                # repérer le nœud le plus proche du forward
+                dev = abs(nd.under - fwd_mid)
+                if dev < min_dev:
+                    min_dev = dev
+                    nxt_mid_node = nd
+
             nxt_mid_node.forward = fwd_mid
+            nxt_mid_S = nxt_mid_node.under
 
-            # calcul des probas du pas (i-1 -> i)
-            if D_next == 0.0:
-                # cas sans dividende : probas identiques pour tous les nœuds
-                p_d, p_m, p_u = self.trinomial_prob_no_div()
-                self.step_probs[i - 1] = (p_d, p_m, p_u)
+            # 2) Recombinaison : lier enfants depuis la colonne i-1 vers i
+            if i == 1:
+                # les enfants de la racine
+                parent = self.root            # j=0
+                child  = head_i               # j=-1 = (j_parent - 1)
+                parent.down = child           # j-1
+                parent.mid  = child.right     # j
+                parent.up   = child.right.right  # j+1
             else:
-                # cas ex-div : probas PAR NŒUD de la colonne précédente
-                col_prev = self.levels[i - 1]
-                col_curr = self.levels[i]
-                self.step_probs_by_node[i - 1] = {}
-                representative = None  # pour compatibilité du plot
+                # on positionne le parent le plus à gauche (j=-(i-1))
+                parent = prev_head
+                # et le "curseur enfant" au j_parent-1 = -i
+                child = head_i
+                while parent is not None:
+                    parent.down = child
+                    parent.mid  = child.right
+                    parent.up   = child.right.right
+                    # avance : parent j -> j+1, child j-1 -> j
+                    parent = parent.right
+                    child  = child.right
 
-                for j_prev, nd_prev in col_prev.items():
-                    S_prev = nd_prev.under
-
-                    # Espérance et variance conditionnelles depuis ce nœud
-                    E_j = S_prev * math.exp(r * dt) - D_next
-                    V_j = (S_prev ** 2) * math.exp(2.0 * r * dt) * (math.exp((sigma ** 2) * dt) - 1.0)
-
-                    # Le "mid" enfant de (i-1, j_prev) est (i, j_prev) dans une structure recombinante
-                    mid_child = col_curr.get(j_prev)
-                    if mid_child is None:
-                        continue
-
-                    S_mid_child = mid_child.under
-
-                    # Formules fermées : appel à la méthode interne existante
-                    p_d, p_m, p_u = self._solve_trinomial_probs(E_j, V_j, S_mid_child, a)
-
-                    # Stockage par nœud
-                    self.step_probs_by_node[i - 1][j_prev] = (p_d, p_m, p_u)
-
-                    # Triplette représentative pour le plot (priorité j=0)
-                    if representative is None or j_prev == 0:
-                        representative = (j_prev, (p_d, p_m, p_u))
-
-                # Pour compatibilité avec le plot (ligne rouge / cartouche)
-                if representative is not None:
-                    self.step_probs[i - 1] = representative[1]
+            # 3) Probabilités au step (i-1 -> i)
+            if D_next == 0.0:
+                # step "no-div": rien à stocker localement (on utilisera la triplette globale)
+                pass
+            else:
+                # ex-div : calculer E, V, et proba PAR nœUD SOURCE de la colonne i-1
+                # tête de la colonne i-1 = prev_head (sauf i=1: parent unique = root)
+                if i == 1:
+                    # nœud source unique : root
+                    sources = [self.root]
                 else:
-                    self.step_probs[i - 1] = (0.0, 1.0, 0.0)  # fallback si rien
+                    sources = list(prev_head.iter_right())
 
-            # préparer pour le pas suivant (mid réel)
+                for nd_prev in sources:
+                    S_prev = nd_prev.under
+                    E_j = S_prev * exp_rdt - D_next
+                    V_j = (S_prev ** 2) * exp_2rdt * var_factor
+
+                    mid_child = nd_prev.mid  # enfant "mid" (i, j_prev)
+                    p_d, p_m, p_u = self._solve_trinomial_probs(E_j, V_j, mid_child.under, a)
+
+                    # stocker sur le nœud source
+                    nd_prev.pd, nd_prev.pm, nd_prev.pu = p_d, p_m, p_u
+
+            # 4) préparer l'itération suivante
+            prev_head = head_i
             current_mid = nxt_mid_S
 
+        self._head_last = prev_head
         return self
 
     # ---------- pricing ----------
-    def _get_probs(self, i, j):
+    def _probas_for_node(self, nd):
         """
-        Retourne (pd, pm, pu) pour le step i -> i+1.
-        - Priorité aux probas par nœud (ex-div): self.step_probs_by_node[i][j]
-        - Sinon fallback aux probas du step:     self.step_probs[i]
+        Renvoie (pd, pm, pu) applicables au step sortant du nœud nd.
+        - Si nd a des probas locales (ex-div), on les utilise.
+        - Sinon, on prend la triplette globale "no-div".
         """
-        by_node = getattr(self, "step_probs_by_node", {}).get(i)
-        if by_node is not None and j in by_node:
-            return by_node[j]
-        return self.step_probs[i]
+        if nd.pd is not None and nd.pm is not None and nd.pu is not None:
+            return nd.pd, nd.pm, nd.pu
+        return self._pd_global, self._pm_global, self._pu_global
 
     def price_european(self, option):
-        """Backward induction, en tenant compte des probas par nœud au pas ex-div."""
+        """
+        Backward itératif (sans containers).
+        Hypothèse : l'arbre a été construit via build_bottom_first(option).
+        """
         N, dt = self.nb_steps, self.delta_t
         DF = math.exp(-self.market.rate * dt)
 
-        values = {i: {j: 0.0 for j in range(-i, i + 1)} for i in range(N + 1)}
-        for j, nd in self.levels[N].items():
-            values[N][j] = option.payoff(nd.under)
+        # 1) Terminal : colonne N
+        headN = self._head_last if self._head_last is not None else self._level_head(N)
+        for nd in headN.iter_right():
+            nd.value = option.payoff(nd.under)
 
+        # 2) Backward i = N-1 .. 0
         for i in range(N - 1, -1, -1):
-            for j in range(-i, i + 1):
-                pd, pm, pu = self._get_probs(i, j)
-                v_up   = values[i + 1][j + 1]
-                v_mid  = values[i + 1][j]
-                v_down = values[i + 1][j - 1]
-                values[i][j] = DF * (pu * v_up + pm * v_mid + pd * v_down)
-
-        return values[0][0]
+            head_i = self._level_head(i)
+            for nd in head_i.iter_right():
+                pu_nd, pm_nd, pd_nd = self._probas_for_node(nd)
+                v_up   = nd.up.value
+                v_mid  = nd.mid.value
+                v_down = nd.down.value
+                nd.value = DF * (pu_nd * v_up + pm_nd * v_mid + pd_nd * v_down)
+        return self.root.value
 
     def price_european_recursive(self, option):
-        """Version récursive (lru_cache), avec probas par nœud au pas ex-div."""
-
-        if not (self.levels and len(self.levels) == (self.nb_steps + 1)):
-            raise ValueError("Construis d'abord l'arbre (build_bottom_first).")
-
+        """
+        Version récursive avec memo implicite (lru_cache sur l'identité des nœuds).
+        Sans containers (on part de la racine et on suit les pointeurs).
+        """
+        from functools import lru_cache
         N, dt = self.nb_steps, self.delta_t
         DF = math.exp(-self.market.rate * dt)
 
         @lru_cache(maxsize=None)
-        def V(i: int, j: int) -> float:
-            if i == N:
-                return option.payoff(self.levels[i][j].under)
-            pd, pm, pu = self._get_probs(i, j)
-            return DF * (pu * V(i + 1, j + 1) + pm * V(i + 1, j) + pd * V(i + 1, j - 1))
+        def V(node_obj: Node):
+            # terminal si pas d'enfants (colonne N)
+            if node_obj.down is None:
+                return option.payoff(node_obj.under)
+            pd_nd, pm_nd, pu_nd = self._probas_for_node(node_obj)
+            return DF * (
+                pu_nd * V(node_obj.up) +
+                pm_nd * V(node_obj.mid) +
+                pd_nd * V(node_obj.down)
+            )
 
-        return V(0, 0)
+        return V(self.root)
 
     def price_american(self, option):
-        """Backward induction avec exercice anticipé + probas par nœud au pas ex-div."""
-        import math
+        """
+        Backward itératif avec exercice anticipé (PUT/option américaine).
+        """
         N, dt = self.nb_steps, self.delta_t
         DF = math.exp(-self.market.rate * dt)
 
-        values = {i: {j: 0.0 for j in range(-i, i + 1)} for i in range(N + 1)}
-        for j, nd in self.levels[N].items():
-            values[N][j] = option.payoff(nd.under)
+        # terminal
+        headN = self._head_last if self._head_last is not None else self._level_head(N)
+        for nd in headN.iter_right():
+            nd.value = option.payoff(nd.under)
 
+        # backward
         for i in range(N - 1, -1, -1):
-            for j, nd in self.levels[i].items():
-                pd, pm, pu = self._get_probs(i, j)
+            head_i = self._level_head(i)
+            for nd in head_i.iter_right():
+                pu_nd, pm_nd, pd_nd = self._probas_for_node(nd)
                 hold = DF * (
-                    pu * values[i + 1][j + 1] +
-                    pm * values[i + 1][j] +
-                    pd * values[i + 1][j - 1]
+                    pu_nd * nd.up.value +
+                    pm_nd * nd.mid.value +
+                    pd_nd * nd.down.value
                 )
                 exercise = option.payoff(nd.under)
-                values[i][j] = max(exercise, hold)
+                nd.value = max(exercise, hold)
+        return self.root.value
 
-        return values[0][0]
-    # ---------- greeks (no-bump) ----------
-    def local_greeks_no_bump(self, option):
-        """
-        Greeks "classiques" (sans bump) à la racine via le 1er étage.
-        Delta/Gamma par différences spatiales. Theta par différence temporelle sur un pas:
-            theta ≈ (V_{i=1, j=0} - V_{i=0, j=0}) / (-dt)   (annualisé).
-        """
-        N, dt = self.nb_steps, self.delta_t
-        r = self.market.rate
-        DF = math.exp(-r * dt)
-
-        # backward pour remplir values[i][j]
-        values = {i: {j: 0.0 for j in range(-i, i + 1)} for i in range(N + 1)}
-        for j, nd in self.levels[N].items():
-            values[N][j] = option.payoff(nd.under)
-        for i in range(N - 1, -1, -1):
-            p_d, p_m, p_u = self.step_probs[i]
-            for j in range(-i, i + 1):
-                v_up   = values[i + 1][j + 1]
-                v_mid  = values[i + 1][j]
-                v_down = values[i + 1][j - 1]
-                values[i][j] = DF * (p_u*v_up + p_m*v_mid + p_d*v_down)
-
-        V0 = values[0][0]
-        S_up   = self.levels[1][1].under
-        S_mid  = self.levels[1][0].under
-        S_down = self.levels[1][-1].under
-
-        V_up   = values[1][1]
-        V_mid  = values[1][0]
-        V_down = values[1][-1]
-
-        # Delta / Gamma (maille non uniforme ok)
-        denom = (S_up - S_down)
-        if abs(denom) < 1e-15:
-            raise ZeroDivisionError("Maille du 1er étage dégénérée.")
-        delta = (V_up - V_down) / denom
-
-        h_up = (S_up - S_mid)
-        h_dn = (S_mid - S_down)
-        if abs(h_up) < 1e-15 or abs(h_dn) < 1e-15:
-            raise ZeroDivisionError("Maille du 1er étage trop fine.")
-        gamma = 2.0 * ( (V_up - V_mid)/h_up - (V_mid - V_down)/h_dn ) / (h_up + h_dn)
-
-        # Theta par différence temporelle (stable dans un arbre)
-        # V_next = valeur au mid de la colonne suivante (i=1, j=0)
-        theta = (V_mid - V0) / (-dt)
-
-        return {"price": V0, "delta": delta, "gamma": gamma, "theta": theta}
-
-    # ---------- plots ----------
     def plot(self, annotate=True, figsize=(9, 6), dpi=110, save_path=None,
              show_edge_probs=True, edge_prob_digits=3):
         """
@@ -443,3 +435,43 @@ class Tree:
         if save_path:
             plt.savefig(save_path, bbox_inches="tight", dpi=dpi, facecolor="white")
         plt.show()
+    # ---------- greeks (à la racine, sans bump) ----------
+    def local_greeks_no_bump(self, option):
+
+        """
+        Delta/Gamma/Theta à la racine en se basant sur la colonne 1.
+        Nécessite que l'arbre soit construit ET que price_european(option) ait été appelé (pour remplir .value).
+        """
+        dt = self.delta_t
+        r = self.market.rate
+
+        # enfants de la racine
+        up = self.root.up
+        mid = self.root.mid
+        down = self.root.down
+        if up is None or mid is None or down is None:
+            raise RuntimeError("Construis d'abord l'arbre et/ou appelle price_european(option).")
+
+        S_up, S_mid, S_down = up.under, mid.under, down.under
+        V_up, V_mid, V_down = up.value, mid.value, down.value
+        V0 = self.root.value
+
+        # Delta
+        denom = (S_up - S_down)
+        if abs(denom) < 1e-15:
+            raise ZeroDivisionError("Maille du 1er étage dégénérée.")
+        delta = (V_up - V_down) / denom
+
+        # Gamma (maille non uniforme ok)
+        h_up = (S_up - S_mid)
+        h_dn = (S_mid - S_down)
+        if abs(h_up) < 1e-15 or abs(h_dn) < 1e-15:
+            raise ZeroDivisionError("Maille du 1er étage trop fine.")
+        gamma = 2.0 * ((V_up - V_mid) / h_up - (V_mid - V_down) / h_dn) / (h_up + h_dn)
+
+        # Theta (différence temporelle sur un pas)
+        DF = math.exp(-r * dt)
+        # Valeur "au pas suivant" au mid (attendue) ~ combi des enfants (déjà dans V_mid)
+        theta = (V_mid - V0) / (-dt)
+
+        return {"price": V0, "delta": delta, "gamma": gamma, "theta": theta}
