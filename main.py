@@ -177,9 +177,9 @@ def main():
     # Marché et option "de base"
 
     # dividend_date = datetime.now() + timedelta(days=150) 
-    dividend_date = datetime(2026, 4, 21) # Exemple de date de dividende (format year month)
-    market = Market(underlying=100.0, rate=0.05, vol=0.30)
-    option = Option(t=1.0, call_put="call", K=102.0, type="european", div=10, div_date=dividend_date)
+    dividend_date = datetime(2026, 3, 1) # Exemple de date de dividende (format year month)
+    market = Market(underlying=100.0, rate=0.03, vol=0.20)
+    option = Option(t=1.0, call_put="put", K=100.0, type="american", div=2, div_date=dividend_date)
 
     # --- Convergence (européen) --- (enlever les commentaires pour lancer)
     """
@@ -291,3 +291,6 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+#TODO : mettre un graph de temps en echelle log, et en echelle normale. 
