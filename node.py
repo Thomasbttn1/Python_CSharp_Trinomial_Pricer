@@ -28,7 +28,8 @@ class Node:
         "under", "forward", "value",
         "down", "mid", "up",
         "left", "right",
-        "pd", "pm", "pu"
+        "pd", "pm", "pu",
+        "proba_reach"
     )
 
     def __init__(self, tree, level: int, index: int):
@@ -52,6 +53,9 @@ class Node:
         self.pd = None
         self.pm = None
         self.pu = None
+
+        #pour le prunning
+        self.proba_reach = 0.0
 
     # Petites aides d'itération
     def iter_right(self):

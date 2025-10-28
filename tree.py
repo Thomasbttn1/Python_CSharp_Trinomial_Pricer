@@ -4,7 +4,7 @@ from node import Node
 import math
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.collections import LineCollection
+from matplotlib.collections import LineCollection   
 
 class Tree:
     """
@@ -32,6 +32,8 @@ class Tree:
 
         # Pointeur (optionnel) vers la tête de la colonne finale (N)
         self._head_last = None
+
+        self.prune_threshold = 10**(-7)
 
     # ---------- utilitaires ----------
     def trinomial_prob_no_div(self):
@@ -100,6 +102,8 @@ class Tree:
             for nd in head_i.iter_right():
                 nd.value = None
 
+    def _should_prune(self, reach_prob: float) -> bool:
+        return (self.prune_threshold is not None) and (reach_prob < self.prune_threshold)
     # ---------- construction de l'arbre ----------
     def build_bottom_first(self, option):
         """
@@ -355,166 +359,85 @@ class Tree:
                 nd.value = max(exercise, hold)
         return self.root.value
 
-    def plot(self, annotate=True, figsize=(9, 6), dpi=110, save_path=None,
-             show_edge_probs=True, edge_prob_digits=3):
+    def plot_pointer(self, annotate=True, figsize=(10, 6), dpi=110):
         """
-        Trace l'arbre trinomial.
-        - En FULL (N<=20) : affiche les valeurs nodales et les proba sur CHAQUE arête.
-          * Au pas ex-div : lit self.step_probs_by_node[i][j] (proba par nœud source).
-          * Sinon : fallback self.step_probs[i] (triplette globale du step).
-        - Les proba sont placées juste AU-DESSUS du trait correspondant.
-          Couleurs: down=red, mid=orange, up=green.
+        Trace l'arbre en parcourant les pointeurs (root, right, down/mid/up).
+        Compatible avec la version sans listes/dictionnaires.
+        -----------------------------------------------------------------------
+        - Chaque colonne i est parcourue via ._level_head(i) et .right
+        - Les arêtes sont tracées vers .down, .mid et .up
+        - Les nœuds sont affichés avec leurs prix sous-jacents
+        -----------------------------------------------------------------------
         """
-        import matplotlib.pyplot as plt
-        from matplotlib.collections import LineCollection
-
-        if not hasattr(self, "levels"):
-            raise ValueError("Il faut d'abord construire l'arbre.")
 
         N = self.nb_steps
         fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
 
-        # Mode adaptatif
-        use_fast = N > 20
-        annotate_nodes = annotate and (not use_fast)
-        show_edge_probs = bool(show_edge_probs and (not use_fast))
-
-        # 1) Arêtes (+ proba sur arêtes en FULL)
         segments = []
-        if not use_fast:
-            for i in range(N):  # edges from column i -> i+1
-                col_i = self.levels[i]
-                col_ip1 = self.levels[i + 1]
+        xs, ys = [], []
 
-                # proba: par nœud prioritaire (ex-div), sinon globale (step)
-                by_node = getattr(self, "step_probs_by_node", {}).get(i)
-                by_step = getattr(self, "step_probs", {}).get(i)
+        # Parcours des colonnes 0..N
+        for i in range(0, N + 1):
+            # Tête de la colonne i
+            head_i = self.root if i == 0 else self._level_head(i)
+            nd = head_i
 
-                for j, nd in col_i.items():
-                    y = nd.under
-                    for dj, idx in ((-1, 0), (0, 1), (+1, 2)):  # down, mid, up
-                        j2 = j + dj
-                        nd2 = col_ip1.get(j2)
-                        if nd2 is None:
-                            continue
+            # Parcours horizontal
+            while nd is not None:
+                xs.append(i)
+                ys.append(nd.under)
 
-                        # segment
-                        segments.append([(i, y), (i + 1, nd2.under)])
+                # Liaisons vers la colonne suivante
+                if i < N:
+                    if nd.down is not None:
+                        segments.append([(i, nd.under), (i + 1, nd.down.under)])
+                    if nd.mid is not None:
+                        segments.append([(i, nd.under), (i + 1, nd.mid.under)])
+                    if nd.up is not None:
+                        segments.append([(i, nd.under), (i + 1, nd.up.under)])
 
-                        # proba juste AU-DESSUS du trait
-                        if show_edge_probs:
-                            p = None
-                            if by_node is not None and j in by_node:
-                                p = by_node[j][idx]
-                            elif by_step is not None:
-                                p = by_step[idx]
+                nd = nd.right  # passer au noeud suivant
 
-                            if p is not None:
-                                x_mid = i + 0.5
-                                y_mid = 0.5 * (y + nd2.under)
-
-                                # petit décalage horizontal pour distinguer down/mid/up
-                                dx_map = {-1: -8, 0: 0, 1: +8}
-                                dy = +8  # au-dessus du trait (en pixels écran)
-                                color_map = {-1: "red", 0: "orange", 1: "green"}
-                                base_color = color_map[dj]
-                                color = "red" if (p < 0 or p > 1) else base_color
-
-                                ax.annotate(f"{p:.{edge_prob_digits}f}",
-                                            (x_mid, y_mid),
-                                            textcoords="offset points",
-                                            xytext=(dx_map[dj], dy),
-                                            ha="center", va="bottom",
-                                            fontsize=8, color=color,
-                                            bbox=dict(boxstyle="round,pad=0.2",
-                                                      facecolor="white", alpha=0.9,
-                                                      linewidth=0))
-        else:
-            # FAST : sous-échantillonnage, pas d’annotations d’arêtes
-            col_stride = max(1, N // 40)
-            for i in range(0, N, col_stride):
-                col_i = self.levels[i]
-                ip1 = min(i + 1, N)
-                col_ip1 = self.levels[ip1]
-                row_stride = max(1, (i + 1) // 10)
-                for j in range(-i, i + 1, row_stride):
-                    nd = col_i.get(j)
-                    if nd is None:
-                        continue
-                    y = nd.under
-                    for dj in (-1, 0, +1):
-                        j2 = j + dj
-                        nd2 = col_ip1.get(j2)
-                        if nd2 is None:
-                            continue
-                        segments.append([(i, y), (ip1, nd2.under)])
-
-        # Ajout des arêtes
-        lc = LineCollection(segments, colors="gray", linewidths=0.6, alpha=0.7,
-                            antialiased=False, rasterized=True)
+        # Arêtes
+        lc = LineCollection(segments, colors="gray", linewidths=0.7, alpha=0.7)
         ax.add_collection(lc)
 
-        # 2) Noeuds
-        xs, ys = [], []
-        if not use_fast:
-            for i, col in self.levels.items():
-                for j, nd in col.items():
-                    xs.append(i); ys.append(nd.under)
-        else:
-            for i, col in self.levels.items():
-                if i % max(1, N // 40): continue
-                row_stride = max(1, (i + 1) // 10)
-                for j in range(-i, i + 1, row_stride):
-                    nd = col.get(j)
-                    if nd is None: continue
-                    xs.append(i); ys.append(nd.under)
-        ax.scatter(xs, ys, s=8 if not use_fast else 4, color="C0", zorder=3, rasterized=True)
-
-        # 3) Annotations des valeurs nodales
-        if annotate_nodes:
-            for i, col in self.levels.items():
-                for j, nd in col.items():
-                    if nd.under is None: continue
-                    ax.annotate(f"{nd.under:.2f}", (i, nd.under),
-                                textcoords="offset points", xytext=(0, 6),
-                                ha="center", fontsize=8)
-
-        # 4) Ligne rouge verticale (repère ex-div si proba changent d’un step au suivant)
-        i_div = None
-        if hasattr(self, "step_probs") and self.step_probs:
-            for i in range(1, N):
-                prev = self.step_probs.get(i - 1)
-                cur = self.step_probs.get(i)
-                if prev and cur and any(abs(a - b) > 1e-9 for a, b in zip(prev, cur)):
-                    i_div = i; break
-        if i_div is not None:
-            ax.axvline(i_div, color="red", linestyle="--", alpha=0.6, linewidth=1.0)
+        # Nœuds
+        ax.scatter(xs, ys, s=20, color="C0", zorder=3)
+        if annotate:
+            for (x, y) in zip(xs, ys):
+                ax.annotate(f"{y:.2f}", (x, y),
+                            textcoords="offset points", xytext=(0, 6),
+                            ha="center", fontsize=8)
 
         # Mise en forme
-        ax.set_title(f"Arbre trinomial (N={N}) — mode {'FAST' if use_fast else 'FULL'}")
+        ax.set_title(f"Arbre trinomial (N={N}) — version pointeurs")
         ax.set_xlabel("Étape (i)")
         ax.set_ylabel("Sous-jacent S(i,j)")
         ax.grid(True, linestyle=":", alpha=0.4)
-
         ax.set_xlim(-0.2, N + 0.2)
-        ymin = min(v.under for col in self.levels.values() for v in col.values())
-        ymax = max(v.under for col in self.levels.values() for v in col.values())
-        marg = 0.04 * (ymax - ymin) if ymax > ymin else 1.0
+
+        ymin, ymax = min(ys), max(ys)
+        marg = 0.05 * (ymax - ymin) if ymax > ymin else 1.0
         ax.set_ylim(ymin - marg, ymax + marg)
 
         plt.tight_layout()
-        if save_path:
-            plt.savefig(save_path, bbox_inches="tight", dpi=dpi, facecolor="white")
         plt.show()
+
     # ---------- greeks (à la racine, sans bump) ----------
     def local_greeks_no_bump(self, option):
+        """
+        Delta/Gamma à la racine (colonne 1 du tree) + Vega (proxy Black-Scholes, sans bump).
 
+        Prérequis :
+          - L'arbre est construit
+          - price_european(option) a été appelé (pour remplir .value)
+          - option.strike existe
         """
-        Delta/Gamma/Theta à la racine en se basant sur la colonne 1.
-        Nécessite que l'arbre soit construit ET que price_european(option) ait été appelé (pour remplir .value).
-        """
+        import math
+
         dt = self.delta_t
-        r = self.market.rate
+        r  = self.market.rate
 
         # enfants de la racine
         up = self.root.up
@@ -523,26 +446,41 @@ class Tree:
         if up is None or mid is None or down is None:
             raise RuntimeError("Construis d'abord l'arbre et/ou appelle price_european(option).")
 
-        S_up, S_mid, S_down = up.under, mid.under, down.under
-        V_up, V_mid, V_down = up.value, mid.value, down.value
+        S_up,  S_mid,  S_down  = up.under,  mid.under,  down.under
+        V_up,  V_mid,  V_down  = up.value,  mid.value,  down.value
         V0 = self.root.value
 
-        # Delta
+        # --- Delta
         denom = (S_up - S_down)
         if abs(denom) < 1e-15:
             raise ZeroDivisionError("Maille du 1er étage dégénérée.")
         delta = (V_up - V_down) / denom
 
-        # Gamma (maille non uniforme ok)
+        # --- Gamma (maille non uniforme ok)
         h_up = (S_up - S_mid)
         h_dn = (S_mid - S_down)
         if abs(h_up) < 1e-15 or abs(h_dn) < 1e-15:
             raise ZeroDivisionError("Maille du 1er étage trop fine.")
         gamma = 2.0 * ((V_up - V_mid) / h_up - (V_mid - V_down) / h_dn) / (h_up + h_dn)
 
-        # Theta (différence temporelle sur un pas)
-        DF = math.exp(-r * dt)
-        # Valeur "au pas suivant" au mid (attendue) ~ combi des enfants (déjà dans V_mid)
-        theta = (V_mid - V0) / (-dt)
+        # --- Vega (proxy Black-Scholes, S = spot racine, T = nb_steps*dt)
+        try:
+            K = float(option.strike)
+        except Exception as e:
+            raise AttributeError("L'option doit avoir un attribut 'strike' pour calculer la vega (proxy BS).") from e
 
-        return {"price": V0, "delta": delta, "gamma": gamma, "theta": theta}
+        S0     = float(self.root.under)
+        sigma  = float(self.market.vol)
+        T_total = max(1e-12, float(self.nb_steps) * float(dt))  # maturité totale
+        if sigma <= 0.0:
+            raise ValueError("market.vol doit être > 0 pour calculer la vega (proxy BS).")
+
+        # densité normale standard
+        def _phi(x):
+            return math.exp(-0.5 * x * x) / math.sqrt(2.0 * math.pi)
+
+        # d1 et vega BS (identique call/put)
+        d1 = (math.log(S0 / K) + (r + 0.5 * sigma * sigma) * T_total) / (sigma * math.sqrt(T_total))
+        vega = S0 * math.sqrt(T_total) * _phi(d1)  # non annualisée (≈ ∂V/∂σ)
+
+        return {"price": V0, "delta": delta, "gamma": gamma, "vega": vega}

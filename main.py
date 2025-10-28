@@ -1,4 +1,5 @@
 # main.py 
+# TODO : mettre un graph de temps en echelle log, et en echelle normale. + Prunning + grecques s'il faut
 from market import Market
 from option import Option
 from tree import Tree
@@ -156,6 +157,7 @@ def compare_euro_amer_call_put(option, market: Market, K: float, T: float, Ns):
                 print("⚠️  Alerte: put américain < européen — vérifier price_american().")
 
 def main():
+
     # Marché et option "de base"
     dividend_date = datetime(2026, 3, 1)
     market = Market(underlying=100.0, rate=0.03, vol=0.20)
@@ -166,6 +168,7 @@ def main():
     tree_highres = Tree(market=market, nb_steps=N_large, delta_t=option.t / N_large)
 
     # 1) Construction
+
     t0 = time.time()
     tree_highres.build_bottom_first(option)
     t1 = time.time()
@@ -205,13 +208,14 @@ def main():
           f"{black_scholes_price(market.underlying, option.K, option.t, market.rate, market.vol, option.call_put):.6f}\n")
     print("=" * 70)
 
-    # Exemple convergence (décommenter au besoin)
+
+    # Exemple convergence
     """
     Ns = [2, 5, 10, 20, 50, 100, 200, 500, 1000]
     run_convergence(market, option, Ns)
     """
 
-    # Exemple GAP vs K (décommenter au besoin)
+    # Exemple GAP vs K
     """
     S0 = market.underlying
     K_min, K_max = 0.6 * S0, 1.4 * S0
@@ -221,13 +225,21 @@ def main():
     """
 
     # Greeks locaux (optionnel)
-    """
+    
     greeks = tree_highres.local_greeks_no_bump(option)
     print("\n=== Greeks (no-bump, à la racine) ===")
     print(f"Price = {greeks['price']:.6f}")
     print(f"Delta = {greeks['delta']:.6f}")
     print(f"Gamma = {greeks['gamma']:.6e}")
-    print(f"Theta = {greeks['theta']:.6f}")
+    print(f"Vega = {greeks['vega']:.6f}")
+    
+
+    #Exemple de plot avec N = 5
+    """
+    N_plot = 5
+    tree_plot = Tree(market=market, nb_steps=N_plot, delta_t=option.t / N_plot)
+    tree_to_plot = tree_plot.build_bottom_first(option)
+    tree_to_plot.plot_pointer(option)
     """
 
 if __name__ == "__main__":
