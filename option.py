@@ -10,6 +10,11 @@ class Option:
         self.div_date = div_date
         self.start_date = datetime(2025, 9, 1)
 
+    @property
+    def strike(self):
+        """Backward-compatible alias for the strike price (expected by other modules)."""
+        return self.K
+
     def payoff(self, S: float) -> float:
         if self.call_put == "call":
             return max(S - self.K, 0.0)

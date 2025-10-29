@@ -429,22 +429,42 @@ class Tree:
         """
         Delta/Gamma à la racine (colonne 1 du tree) + Vega (proxy Black-Scholes, sans bump).
 
+        Cette fonction s'assure que les valeurs node.value nécessaires sont remplies
+        en appelant automatiquement le pricer backward correspondant au style de
+        l'option (`option.type` attendu : 'european' ou 'american').
+
         Prérequis :
-          - L'arbre est construit
-          - price_european(option) a été appelé (pour remplir .value)
+          - L'arbre est construit (build_bottom_first(option))
+          - option.type doit être 'european' ou 'american' (par défaut 'european')
           - option.strike existe
         """
         import math
 
         dt = self.delta_t
-        r  = self.market.rate
+        r = self.market.rate
+
+        # Détermine le style à utiliser pour remplir .value
+        style = getattr(option, "type", "european")
+        if style is None:
+            style = "european"
+        style = str(style).lower().strip()
+        if style not in ("european", "american"):
+            raise ValueError("option.type doit être 'european' ou 'american'.")
+
+        # Remplit les .value du tree en exécutant le pricer backward adapté
+        # (on force engine='backward' car nous lisons les valeurs des enfants immédiats)
+        try:
+            # price() mettra à jour .value sur tous les nœuds via l'algorithme backward
+            self.price(option, engine="backward", style=style)
+        except Exception as e:
+            raise RuntimeError(f"Impossible de calculer les valeurs du tree pour calculer les grecs : {e}") from e
 
         # enfants de la racine
         up = self.root.up
         mid = self.root.mid
         down = self.root.down
         if up is None or mid is None or down is None:
-            raise RuntimeError("Construis d'abord l'arbre et/ou appelle price_european(option).")
+            raise RuntimeError("Construis d'abord l'arbre (build_bottom_first) avant de calculer les grecs.")
 
         S_up,  S_mid,  S_down  = up.under,  mid.under,  down.under
         V_up,  V_mid,  V_down  = up.value,  mid.value,  down.value
@@ -481,6 +501,6 @@ class Tree:
 
         # d1 et vega BS (identique call/put)
         d1 = (math.log(S0 / K) + (r + 0.5 * sigma * sigma) * T_total) / (sigma * math.sqrt(T_total))
-        vega = S0 * math.sqrt(T_total) * _phi(d1)  # non annualisée (≈ ∂V/∂σ)
+        vega = S0 * math.sqrt(T_total) * _phi(d1) / 100  # non annualisée (≈ ∂V/∂σ)
 
         return {"price": V0, "delta": delta, "gamma": gamma, "vega": vega}

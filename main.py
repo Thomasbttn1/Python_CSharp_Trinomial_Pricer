@@ -159,12 +159,12 @@ def compare_euro_amer_call_put(option, market: Market, K: float, T: float, Ns):
 def main():
 
     # Marché et option "de base"
-    dividend_date = datetime(2026, 3, 1)
-    market = Market(underlying=100.0, rate=0.03, vol=0.20)
-    option = Option(t=1.0, call_put="put", K=100.0, type="american", div=2, div_date=dividend_date)
+    dividend_date = datetime(2026, 4, 21)
+    market = Market(underlying=100.0, rate=0.05, vol=0.30)
+    option = Option(t=1.0, call_put="call", K=102.0, type="european", div=3, div_date=dividend_date)
 
     # --- Prix avec un N "grand" pour référence ---
-    N_large = 1000
+    N_large = 400
     tree_highres = Tree(market=market, nb_steps=N_large, delta_t=option.t / N_large)
 
     # 1) Construction
