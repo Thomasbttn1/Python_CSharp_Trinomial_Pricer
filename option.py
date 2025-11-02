@@ -8,7 +8,7 @@ class Option:
         self.type = type          # 'european' or 'american'
         self.div = div
         self.div_date = div_date
-        self.start_date = datetime(2025, 9, 1)
+        self.start_date = datetime(2025, 10, 29)
 
     @property
     def strike(self):
